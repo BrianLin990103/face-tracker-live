@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>即時臉部掃描追蹤</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0b0f14;color:#e6edf3;font-family:system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;min-height:100vh}
+h1{font-size:1.3rem;margin:16px 0 4px}p.s{margin:0 0 12px;color:#8b98a5;font-size:.85rem;text-align:center;padding:0 12px}
+#stage{position:relative;width:min(96vw,720px);aspect-ratio:4/3;background:#000;border-radius:12px;overflow:hidden}
+video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
+#scan{position:absolute;left:0;right:0;height:3px;background:linear-gradient(90deg,transparent,#00ffa6,transparent);animation:sc 2.2s linear infinite;pointer-events:none;display:none}
+@keyframes sc{0%{top:0}100%{top:100%}}
+.bar{display:flex;gap:10px;margin:14px;flex-wrap:wrap;justify-content:center;align-items:center}
+button{background:#00c389;color:#04130d;border:0;padding:10px 18px;border-radius:8px;font-weight:700;font-size:1rem;cursor:pointer}button:disabled{opacity:.5}
+button.g{background:#26313c;color:#e6edf3}
+#info{font:13px/1.5 ui-monospace,monospace;color:#9fe8cf;min-height:3em;text-align:center}
+</style>
+</head>
+<body>
+<h1>即時臉部掃描追蹤</h1>
+<p class="s">所有影像只在你的瀏覽器本機處理,不會上傳或儲存。</p>
+<div id="stage"><video id="v" playsinline muted></video><canvas id="c"></canvas><div id="scan"></div></div>
+<div class="bar"><button id="go">開啟鏡頭</button><button id="mesh" class="g" disabled>臉部網格:開</button><button id="stop" class="g" disabled>停止</button></div>
+<div id="info">按「開啟鏡頭」開始(需允許攝影機權限)</div>
+<script type="module">
+import {FaceLandmarker,FilesetResolver,DrawingUtils} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+const $=id=>document.getElementById(id),v=$('v'),c=$('c'),ctx=c.getContext('2d'),info=$('info');
+let lm,stream,run=false,showMesh=true,last=-1,tracks=[],nid=1,fps=0,t0=performance.now();
+async function init(){
+ info.textContent='載入模型中…';
+ const fs=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+ const opt=d=>({baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',delegate:d},runningMode:'VIDEO',numFaces:5});
+ try{lm=await FaceLandmarker.createFromOptions(fs,opt('GPU'))}catch(e){lm=await FaceLandmarker.createFromOptions(fs,opt('CPU'))}
+}
+function bbox(p){let a=1,b=1,x=0,y=0;for(const q of p){a=Math.min(a,q.x);b=Math.min(b,q.y);x=Math.max(x,q.x);y=Math.max(y,q.y)}return{x:a,y:b,w:x-a,h:y-b,cx:(a+x)/2,cy:(b+y)/2}}
+function assign(boxes){
+ const used=new Set(),out=[];
+ for(const b of boxes){let best=null,bd=0.15;for(const t of tracks){if(used.has(t.id))continue;const d=Math.hypot(t.cx-b.cx,t.cy-b.cy);if(d<bd){bd=d;best=t}}
+  const id=best?best.id:nid++;used.add(id);out.push({...b,id})}
+ tracks=out;return out;
+}
+function loop(){
+ if(!run)return;
+ if(v.currentTime!==last&&v.readyState>=2){
+  last=v.currentTime;
+  const r=lm.detectForVideo(v,performance.now());
+  c.width=v.videoWidth;c.height=v.videoHeight;ctx.clearRect(0,0,c.width,c.height);
+  const du=new DrawingUtils(ctx),faces=r.faceLandmarks||[];
+  const tr=assign(faces.map(bbox));
+  faces.forEach((p,i)=>{
+   if(showMesh){du.drawConnectors(p,FaceLandmarker.FACE_LANDMARKS_TESSELATION,{color:'#00ffa655',lineWidth:.5});du.drawConnectors(p,FaceLandmarker.FACE_LANDMARKS_FACE_OVAL,{color:'#00ffa6',lineWidth:2});du.drawConnectors(p,FaceLandmarker.FACE_LANDMARKS_LEFT_EYE,{color:'#4dd0ff'});du.drawConnectors(p,FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE,{color:'#4dd0ff'});du.drawConnectors(p,FaceLandmarker.FACE_LANDMARKS_LIPS,{color:'#ff6b81'})}
+   const b=tr[i],W=c.width,H=c.height;
+   ctx.strokeStyle='#00ffa6';ctx.lineWidth=3;ctx.strokeRect(b.x*W,b.y*H,b.w*W,b.h*H);
+   ctx.save();ctx.translate(b.x*W,b.y*H-6);ctx.scale(-1,1);ctx.fillStyle='#00ffa6';ctx.font='bold 22px sans-serif';ctx.textAlign='right';ctx.fillText('Face #'+b.id,b.w*W,0);ctx.restore();
+  });
+  fps=Math.round(1000/(performance.now()-t0));t0=performance.now();
+  info.textContent='偵測到 '+faces.length+' 張臉 | '+fps+' FPS'+(tr.length?' | 追蹤 ID: '+tr.map(t=>'#'+t.id).join(', '):'');
+ }
+ requestAnimationFrame(loop);
+}
+$('go').onclick=async()=>{
+ $('go').disabled=true;
+ try{
+  if(!lm)await init();
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:1280},height:{ideal:720}},audio:false});
+  v.srcObject=stream;await v.play();run=true;$('scan').style.display='block';$('mesh').disabled=false;$('stop').disabled=false;loop();
+ }catch(e){info.textContent='無法啟動:'+e.message;$('go').disabled=false}
+};
+$('mesh').onclick=()=>{showMesh=!showMesh;$('mesh').textContent='臉部網格:'+(showMesh?'開':'關')};
+$('stop').onclick=()=>{run=false;stream&&stream.getTracks().forEach(t=>t.stop());ctx.clearRect(0,0,c.width,c.height);$('scan').style.display='none';$('go').disabled=false;$('stop').disabled=true;$('mesh').disabled=true;tracks=[];info.textContent='已停止'};
+</script>
+</body>
+</html>
